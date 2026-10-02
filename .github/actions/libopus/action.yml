@@ -1,0 +1,62 @@
+name: libopus 1.5.2 en Release
+description: >
+  libopus 1.5.2 compilado en Release y en caché (la instalación entera, no sólo
+  el tarball), y LIBOPUS_LIB_DIR/LIBOPUS_STATIC para audiopus_sys.
+  audiopus_sys compila el suyo con cmake-rs, que en MSVC sustituye
+  CMAKE_C_FLAGS_RELEASE por las banderas de cc y quita toda /O* (cmake 0.1.58,
+  src/lib.rs:724 y :751): salía SIN optimizar y decodificar gastaba el 1,8 % de
+  un núcleo. Aquí se compila con las banderas de CMake.
+runs:
+  using: composite
+  steps:
+    # Clave: la suma del tarball y la versión de esta receta (subir «-v1» si cambia).
+    - name: Caché de libopus compilado
+      id: compilado
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opus-i
+        key: libopus-1.5.2-65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1-v1
+    # El tarball también en caché: una caída de downloads.xiph.org no puede
+    # tumbar la CI (pasó el 01-10, ejecución 36937299900).
+    - name: Caché del tarball de libopus
+      if: steps.compilado.outputs.cache-hit != 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/opus-tarball
+        key: opus-1.5.2-65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
+    - name: Compilar libopus
+      if: steps.compilado.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $raiz = "$env:RUNNER_TEMP/opus"
+        $guardado = "$env:RUNNER_TEMP/opus-tarball/opus-1.5.2.tar.gz"
+        if (-not (Test-Path $guardado)) {
+          New-Item -ItemType Directory -Force (Split-Path $guardado) | Out-Null
+          # Tres intentos, con 5 y 15 s de espera.
+          foreach ($espera in 0, 5, 15) {
+            Start-Sleep -Seconds $espera
+            try { Invoke-WebRequest https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz -OutFile $guardado; break }
+            catch { Write-Warning "descarga de libopus fallida: $_"; Remove-Item -ErrorAction SilentlyContinue $guardado }
+          }
+        }
+        Copy-Item $guardado "$raiz.tar.gz"
+        if ((Get-FileHash "$raiz.tar.gz" -Algorithm SHA256).Hash -ne '65C1D2F78B9F2FB20082C38CBE47C951AD5839345876E46941612EE87F9A7CE1') { Write-Error 'suma de opus-1.5.2 distinta'; exit 1 }
+        New-Item -ItemType Directory -Force $raiz | Out-Null
+        tar -xzf "$raiz.tar.gz" -C $raiz --strip-components=1
+        cmake -S $raiz -B "$raiz-b" -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_SHARED_LIBRARY=OFF
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cmake --build "$raiz-b" --config Release
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cmake --install "$raiz-b" --config Release --prefix "$env:RUNNER_TEMP/opus-i"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # Vigilancia: optimizado de verdad.
+        $banderas = Select-String -LiteralPath "$raiz-b/CMakeCache.txt" -Pattern '^CMAKE_C_FLAGS_RELEASE:' | ForEach-Object Line
+        Write-Output $banderas
+        if ($banderas -notmatch '/O2') { Write-Error 'libopus sin /O2'; exit 1 }
+        "libopus 1.5.2 compilado: $banderas" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+    - name: Usar libopus
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "$env:RUNNER_TEMP/opus-i/lib/opus.lib")) { Write-Error 'falta opus.lib en la caché'; exit 1 }
+        "LIBOPUS_LIB_DIR=$env:RUNNER_TEMP/opus-i" | Out-File -FilePath $env:GITHUB_ENV -Append
+        "LIBOPUS_STATIC=1" | Out-File -FilePath $env:GITHUB_ENV -Append

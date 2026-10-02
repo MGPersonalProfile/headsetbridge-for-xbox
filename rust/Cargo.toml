@@ -1,0 +1,33 @@
+[workspace]
+members = ["xbox-solo-audio"]
+resolver = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# El de cada push en la CI: sin LTO y en paralelo, para que el exe de
+# los experimentos salga en ~1 min en vez de ~2; mismo opt-level 3 y mismo
+# panic/strip que `release`. El producto instalado sigue saliendo de `release`.
+[profile.pruebas]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
+# Variantes para medir tamaño y CPU (workflow rust-perfiles.yml). La de producto es `release`.
+[profile.release-fat]
+inherits = "release"
+lto = "fat"
+
+[profile.release-s]
+inherits = "release"
+lto = "fat"
+opt-level = "s"
+
+[profile.release-z]
+inherits = "release"
+lto = "fat"
+opt-level = "z"

@@ -1,0 +1,24 @@
+XBOX SOLO AUDIO - qué usar
+==========================
+
+1. JUGAR - audio de la Xbox en los cascos
+   Para jugar. Mandas con el mando de la consola y ves la tele; el sonido sale
+   por los auriculares del PC. Doble clic: empieza a sonar. Otro doble clic: para.
+
+2. MÚSICA - Spotify de la consola en los cascos
+   Para escuchar Spotify (u otra app de música) de la consola en el PC sin que
+   la consola se ponga en "modo remoto". Si Spotify no está sonando, lo abre solo.
+   En cada relevo (una vez por minuto) puede notarse medio segundo raro.
+   Doble clic: empieza. Otro doble clic: para.
+
+3. Greenlight - ver la consola
+   El cliente completo, con imagen, por si quieres ver la consola en el PC.
+   No hace falta para los otros dos. Tiene que estar CERRADO cuando uses 1 o 2.
+
+La primera vez que uses 1 o 2 sin haber iniciado sesión nunca, se abre el
+navegador en microsoft.com/link y una ventanita con un código: escríbelo,
+inicia sesión con tu cuenta de Xbox y empezará a sonar. Sólo hace falta una vez.
+
+Usa sólo uno a la vez. Los dos primeros son el mismo programa (2,4 MB,
+sin ventana), instalado en %LOCALAPPDATA%\Programs\XboxSoloAudioRust.
+Si algo falla, el registro está en %LOCALAPPDATA%\XboxSoloAudio\rust.log

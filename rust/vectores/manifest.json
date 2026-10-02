@@ -1,0 +1,53 @@
+{
+  "origen": "el prototipo en Node",
+  "tiempoMs": 1234.5,
+  "ids": [
+    "00000000-0000-4000-8000-000000000001",
+    "00000000-0000-4000-8000-000000000002",
+    "00000000-0000-4000-8000-000000000003",
+    "00000000-0000-4000-8000-000000000004",
+    "00000000-0000-4000-8000-000000000005",
+    "00000000-0000-4000-8000-000000000006",
+    "00000000-0000-4000-8000-000000000007",
+    "00000000-0000-4000-8000-000000000008"
+  ],
+  "ordenCanales": [
+    [
+      "input",
+      "1.0"
+    ],
+    [
+      "chat",
+      "chatV1"
+    ],
+    [
+      "control",
+      "controlV1"
+    ],
+    [
+      "message",
+      "messageV1"
+    ]
+  ],
+  "secuencias": {
+    "metadatos": 0,
+    "pulsoInactividad": 1,
+    "mandoReposo": 42,
+    "mandoDosTramas": 65535
+  },
+  "archivos": [
+    "handshake.bin",
+    "autorizacion.bin",
+    "cambioMando.bin",
+    "metadatos.bin",
+    "pulsoInactividad.bin",
+    "mandoReposo.bin",
+    "mandoDosTramas.bin",
+    "configuracion0.bin",
+    "configuracion1.bin",
+    "configuracion2.bin",
+    "configuracion3.bin",
+    "configuracion4.bin",
+    "configuracion5.bin"
+  ]
+}

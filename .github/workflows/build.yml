@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # audiopus_sys configures its bundled libopus with an old cmake_minimum_required.
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/libopus
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: libopus-1.5.2
+      - name: Test
+        shell: pwsh
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build (release)
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path rust/Cargo.toml --package xbox-solo-audio
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & rust/target/release/xbox-solo-audio.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headsetbridge-windows
+          path: |
+            rust/target/release/xbox-solo-audio.exe
+            tools/install.ps1
+            tools/recursos/
+          if-no-files-found: error

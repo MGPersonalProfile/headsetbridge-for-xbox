@@ -1,0 +1,47 @@
+[package]
+name = "xbox-solo-audio"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# por defecto, el producto que se instala: la ruta nativa con el TLS
+# de Windows (Schannel por native-tls; 2,42 MiB en `release`). Para comparar:
+# `--features webrtc` añade la ruta WebRTC (webrtc-rs, ~140 crates y ~1,9 MB) y
+# `--no-default-features --features rustls` cambia el TLS por rustls.
+# `winhttp` hace el HTTPS con WinHTTP de Windows (src/http.rs), sin
+# reqwest ni su pila; manda sobre las otras dos si va junto a ellas.
+[features]
+default = ["schannel"]
+webrtc = ["dep:webrtc", "dep:bytes"]
+rustls = ["dep:reqwest", "reqwest/rustls-tls"]
+schannel = ["dep:reqwest", "reqwest/native-tls"]
+winhttp = ["windows/Win32_Networking_WinHttp"]
+
+[dependencies]
+bytes = { version = "1", optional = true }
+serde_json = { version = "1", features = ["preserve_order"] } # no reordenar el config.json de Greenlight
+# un solo hilo (sin `rt-multi-thread`) y sin `process` (el puente de
+# Node de `--credenciales` se retiró); `macros` es por `select!`, `pin!` y `try_join!`.
+tokio = { version = "1", features = ["macros", "rt", "time", "sync", "net", "io-util"] }
+# Schannel (o rustls con la feature `rustls`) y no OpenSSL: sin DLL junto al exe.
+reqwest = { version = "0.12", default-features = false, optional = true }
+uuid = { version = "1", features = ["v4"] }
+webrtc = { version = "=0.13.0", optional = true }
+# libopus (estático, lo compila audiopus_sys con cmake) y salida WASAPI compartida.
+opus = "0.3"
+cpal = "0.15"
+# Ruta Nano V3 nativa (src/nano): SRTP AES-128-GCM y STUN propios. Ya venían con
+# webrtc, así que no suman peso.
+aes = "0.8"
+aes-gcm = "0.10"
+ctr = "0.9"
+hmac = "0.12"
+sha1 = "0.10"
+crc = "3"
+base64 = "0.22"
+
+# `--salida-iac3` (A9): IAudioClient3 con el periodo mínimo del motor compartido;
+# WinSock para `SIO_UDP_CONNRESET`.
+# La misma versión que usa cpal: no suma peso.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.54", features = ["Win32_Media_Audio", "Win32_Foundation", "Win32_System_Com", "Win32_System_Threading", "Win32_UI_Shell_PropertiesSystem", "Win32_Networking_WinSock", "Win32_System_IO", "Win32_System_ProcessStatus", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
