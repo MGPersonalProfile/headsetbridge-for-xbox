@@ -284,7 +284,9 @@ impl Protocolo {
     pub fn boton(&mut self, cual: Boton, ms: u64, ahora_us: u64) -> Vec<Salida> {
         if !self.entrada_activa || self.opciones.entrada == Entrada::Ninguna { return Vec::new() }
         let mut sal = Vec::new();
-        if self.pulsado.is_some() { sal.push(self.reposo(ahora_us)) }
+        if self.pulsado.is_some() || self.mando[MANDO_BOTONES..MANDO_BOTONES + 2] != [0, 0] {
+            sal.push(self.reposo(ahora_us))
+        }
         let (contador, mascara) = cual.bits();
         self.mando[contador] = self.mando[contador].wrapping_add(1);
         self.mando[MANDO_BOTONES..MANDO_BOTONES + 2].copy_from_slice(&mascara.to_le_bytes());
@@ -298,14 +300,22 @@ impl Protocolo {
     /// sólo si algo cambió. Sin canal Input (modo música), nada.
     pub fn mando_pc(&mut self, traductor: &mut crate::raton_teclado::Traductor, e: &crate::raton_teclado::Estado, ahora_us: u64) -> Option<Salida> {
         if !self.entrada_activa { return None }
+        self.pulsado = None;
+        self.reposo_en = None;
         traductor.aplicar(e, &mut self.mando).then(|| self.trama_mando(ahora_us))
     }
 
     /// El mando en reposo: ejes a cero y, si había un botón pulsado, suelto
     /// (su contador sube otra vez, como greenlight-native).
     fn reposo(&mut self, ahora_us: u64) -> Salida {
-        if let Some(b) = self.pulsado.take() { let (c, _) = b.bits(); self.mando[c] = self.mando[c].wrapping_add(1) }
+        self.pulsado = None;
+        let mascara = u16::from_le_bytes([self.mando[MANDO_BOTONES], self.mando[MANDO_BOTONES + 1]]);
+        for b in crate::raton_teclado::Boton::TODOS {
+            let (contador, bit) = b.bits();
+            if mascara & bit != 0 { self.mando[contador] = self.mando[contador].wrapping_add(1) }
+        }
         self.mando[MANDO_EJE_X..MANDO_EJE_X + 8].fill(0);
+        self.mando[17..=18].fill(0);
         self.mando[MANDO_BOTONES..MANDO_BOTONES + 2].fill(0);
         self.trama_mando(ahora_us)
     }
@@ -555,7 +565,9 @@ impl Protocolo {
         sal.extend([a, b]);
         let party = if self.opciones.party_activa { r#"{"partyChatActive":true}"# } else { r#"{"partyChatActive":false}"# };
         let claves: [(&str, &str, u32); 7] = [
-            ("/streaming/characteristics/dimensionschanged", r#"{"horizontal":130,"preferredHeight":1170,"preferredWidth":2532,"safeAreaBottom":1107,"safeAreaLeft":141,"safeAreaRight":2391,"safeAreaTop":0,"supportsCustomResolution":false,"vertical":73}"#, SIN_ACK),
+            // El cliente declara 1920×1080 en xHome. La antigua plantilla de
+            // móvil (2532×1170 con márgenes) anunciaba otra superficie al juego.
+            ("/streaming/characteristics/dimensionschanged", r#"{"horizontal":1920,"vertical":1080,"preferredWidth":1920,"preferredHeight":1080,"safeAreaLeft":0,"safeAreaTop":0,"safeAreaRight":1920,"safeAreaBottom":1080,"supportsCustomResolution":true}"#, SIN_ACK),
             ("/streaming/characteristics/orientationchanged", r#"{"orientation":0}"#, SIN_ACK),
             ("/streaming/social/partyChatAudioCoordination/setPartyChatActive", party, PIDE_ACK),
             ("/streaming/properties/clientappinstallidchanged", r#"{"clientAppInstallId":"66354ea190f8a47031fff981236fac55"}"#, SIN_ACK),
@@ -733,6 +745,27 @@ mod pruebas {
     }
 
     #[test]
+    fn pulso_y_boton_respetan_contadores_del_mando_pc() {
+        use crate::raton_teclado::{Estado, Traductor};
+        let mut p = Protocolo::nuevo(Opciones::default());
+        let config = Escritor::default().u16(CONFIG_ENTRADA).u16(0).u32(24).u32(4).u32(11).u32(1280).u32(720).u32(0).u32(500).fin();
+        p.recibir(35, SSRC_ENTRADA, &canal_srv(MUX_CONFIG, &config, 3), 0);
+        let mut t = Traductor::default();
+        let pulsado = Estado { botones: vec![crate::raton_teclado::Boton::A], ..Default::default() };
+        p.mando_pc(&mut t, &pulsado, 0).unwrap();
+        assert_eq!(p.mando[13], 1);
+        p.pulso(1_000);
+        p.diferidas(101_000);
+        assert_eq!(p.mando[13], 2, "el reposo cuenta la suelta de A");
+        p.mando_pc(&mut t, &pulsado, 102_000).unwrap();
+        assert_eq!(p.mando[13], 3, "al volver a pulsar A cuenta otro cambio");
+        p.boton(Boton::B, 100, 103_000);
+        assert_eq!(p.mando[13], 4, "boton suelta A antes de pulsar B");
+        p.mando_pc(&mut t, &Estado::default(), 104_000).unwrap();
+        assert_eq!(p.mando[14], 2, "el traductor cuenta la suelta de B");
+    }
+
+    #[test]
     fn mtu_en_el_acto() {
         let mut p = Protocolo::nuevo(Opciones { mtu_en_el_acto: true, ..Default::default() });
         let (sal, _) = p.recibir(PT_SONDEO, 0, &sondeo_syn(1232), 0);
@@ -790,5 +823,42 @@ mod pruebas {
         let (_, ev) = p.recibir(35, SSRC_CONTROL, &canal_srv(MUX_DATOS, &raro, 10), 0);
         assert!(ev.is_empty());
         assert_eq!(p.desconocidos.values().sum::<u64>(), 5);
+    }
+
+    #[test]
+    fn la_pantalla_remota_declara_16_9_sin_recortar_el_area_segura() {
+        let mut p = Protocolo::nuevo(Opciones::default());
+        let (sal, _) = p.recibir(35, SSRC_MENSAJES, &canal_srv(MUX_ABRIR, &abrir_peticion_mensajes(), 4), 0);
+        let dimensiones = sal.iter().find_map(|s| {
+            let (_, cuerpo, _) = leer_dct(&s.carga)?;
+            let (tipo, datos) = leer_canal(cuerpo)?;
+            if tipo != MUX_DATOS || datos.len() < 2 { return None }
+            let m = leer_mensaje(&datos[2..])?;
+            (m.clave == "/streaming/characteristics/dimensionschanged")
+                .then(|| serde_json::from_slice::<serde_json::Value>(m.valor).ok()).flatten()
+        }).expect("la apertura comunica dimensiones");
+        assert_eq!(dimensiones["horizontal"], 1920);
+        assert_eq!(dimensiones["vertical"], 1080);
+        assert_eq!(dimensiones["preferredWidth"], 1920);
+        assert_eq!(dimensiones["preferredHeight"], 1080);
+        assert_eq!(dimensiones["safeAreaLeft"], 0);
+        assert_eq!(dimensiones["safeAreaTop"], 0);
+        assert_eq!(dimensiones["safeAreaRight"], 1920);
+        assert_eq!(dimensiones["safeAreaBottom"], 1080);
+        assert_eq!(dimensiones["supportsCustomResolution"], true);
+    }
+
+    #[test]
+    fn la_entrada_normal_no_lleva_mando_pero_el_pulso_de_inactividad_si() {
+        let mut p = Protocolo::nuevo(Opciones::default());
+        let config = Escritor::default().u16(CONFIG_ENTRADA).u16(0).u32(24).u32(4).u32(11).u32(1280).u32(720).u32(0).u32(500).fin();
+        p.recibir(35, SSRC_ENTRADA, &canal_srv(MUX_CONFIG, &config, 3), 0);
+        let tiene_mando = |s: Salida| {
+            let (_, cuerpo, _) = leer_dct(&s.carga).unwrap();
+            let (_, datos) = leer_canal(cuerpo).unwrap();
+            u16::from_le_bytes([datos[22], datos[23]])
+        };
+        assert_eq!(tiene_mando(p.trama_entrada(1_000_000).unwrap()), 0);
+        assert_eq!(tiene_mando(p.pulso(600_000_000).unwrap()), 1);
     }
 }

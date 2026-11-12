@@ -52,14 +52,14 @@ function Nuevo-Acceso([string]$Nombre, [string]$Destino, [string]$Argumentos, [s
 $icono = Join-Path $destino 'solo-audio.ico'
 $conConsola = ((@($(if ($Consola) { "--consola=$Consola" }), $(if ($Volumen -ne 100) { "--volumen=$Volumen" })) | Where-Object { $_ }) -join ' ')
 "instalado: $instalado ($([math]::Round((Get-Item $instalado).Length / 1MB, 2)) MiB)"
-Nuevo-Acceso '1. JUGAR - audio de la Xbox en los cascos' $instalado $conConsola 'Para jugar: el audio de la consola en los auriculares del PC. Un clic suena, otro para.' $icono
+Nuevo-Acceso '1. PLAY - Xbox audio in your headphones' $instalado $conConsola 'For playing: the console audio in the PC headphones. One click plays, another stops.' $icono
 # Modo música: sin entrada, la consola no entra
 # en modo juego remoto; relevo por re-enganche a 57 s de Provisioned, Play por la
 # nube y reserva de 3 s que tapa el hueco (todo lo decide modo.rs).
-Nuevo-Acceso '2. MÚSICA - Spotify de la consola en los cascos' $instalado ((@('--sin-entrada', '--relevo-provisioned', $conConsola) | Where-Object { $_ }) -join ' ') 'Para Spotify u otra app de música de la consola. Un clic suena, otro para.' $icono
+Nuevo-Acceso '2. MUSIC - the console music app in your headphones' $instalado ((@('--sin-entrada', '--relevo-provisioned', $conConsola) | Where-Object { $_ }) -join ' ') 'For Spotify or another music app on the console. One click plays, another stops.' $icono
 $greenlight = Join-Path $env:LOCALAPPDATA 'Programs\greenlight-desktop\Greenlight.exe'
-if (Test-Path $greenlight) { Nuevo-Acceso '3. Greenlight - ver la consola' $greenlight '' 'Greenlight completo (imagen y mando). No hace falta para los otros dos.' '' }
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'recursos\LEEME-escritorio.txt') -Destination (Join-Path $carpeta 'LÉEME.txt') -Force
+if (Test-Path $greenlight) { Nuevo-Acceso '3. Greenlight - see the console' $greenlight '' 'Full Greenlight (picture and controller). Not needed for the other two.' '' }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'recursos\README-desktop.txt') -Destination (Join-Path $carpeta 'README.txt') -Force
 # Los accesos sueltos de antes del 02-10 (fuera de la carpeta).
 foreach ($viejo in 'Xbox solo audio (Rust).lnk', 'Xbox solo audio (música).lnk', (Join-Path 'Xbox solo audio' '3. Greenlight - iniciar sesión y ver la consola.lnk')) {
     $f = Join-Path $escritorio $viejo

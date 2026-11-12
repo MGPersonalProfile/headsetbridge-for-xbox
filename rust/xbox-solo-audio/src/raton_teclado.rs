@@ -30,7 +30,7 @@ impl Boton {
 pub struct Estado {
     /// WASD: (derecha − izquierda, arriba − abajo), cada uno −1, 0 o 1.
     pub mover: (i8, i8),
-    /// El ratón en este intervalo, en cuentas (Raw Input, relativo).
+    /// El ratón en este intervalo, en cuentas relativas de Raw Input.
     pub raton: (i32, i32),
     pub gatillo_izq: bool,
     pub gatillo_der: bool,
@@ -43,11 +43,10 @@ pub struct Traductor {
     pub sensibilidad: f32,
     /// Exponente de la curva del stick derecho (1 = lineal; <1 responde antes).
     pub curva: f32,
-    previos: u16,
 }
 
 impl Default for Traductor {
-    fn default() -> Self { Self { sensibilidad: 40.0, curva: 0.7, previos: 0 } }
+    fn default() -> Self { Self { sensibilidad: 40.0, curva: 0.7 } }
 }
 
 const TOPE: f32 = 32767.0;
@@ -58,11 +57,11 @@ impl Traductor {
     pub fn aplicar(&mut self, e: &Estado, mando: &mut Mando) -> bool {
         let antes = *mando;
         let mascara = e.botones.iter().fold(0u16, |m, b| m | b.bits().1);
+        let previos = u16::from_le_bytes([mando[MANDO_BOTONES], mando[MANDO_BOTONES + 1]]);
         for b in Boton::TODOS {
             let (contador, bit) = b.bits();
-            if (mascara ^ self.previos) & bit != 0 { mando[contador] = mando[contador].wrapping_add(1) }
+            if (mascara ^ previos) & bit != 0 { mando[contador] = mando[contador].wrapping_add(1) }
         }
-        self.previos = mascara;
         mando[MANDO_BOTONES..MANDO_BOTONES + 2].copy_from_slice(&mascara.to_le_bytes());
         mando[17] = if e.gatillo_izq { 255 } else { 0 };
         mando[18] = if e.gatillo_der { 255 } else { 0 };
@@ -119,12 +118,41 @@ mod pruebas {
         t.aplicar(&Estado::default(), &mut m);
         assert_eq!((0..4).map(|i| eje(&m, i)).collect::<Vec<_>>(), vec![0, 0, 0, 0]);
     }
+
+    #[test]
+    fn el_raton_envia_una_ultima_trama_neutra_al_parar() {
+        *CAPTURA.lock().unwrap() = Some(Captura { activa: true, dx: 12, ..Default::default() });
+        assert_eq!(tomar().unwrap().raton, (12, 0));
+        assert_eq!(tomar().unwrap().raton, (0, 0));
+        assert!(tomar().is_none());
+        *CAPTURA.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn deltas_crudos_relativos_sin_coordenadas_de_pantalla() {
+        let mut c = Captura::default();
+        c.acumular_raton(500, 300);
+        assert_eq!((c.dx, c.dy), (0, 0), "sin captura no se consume el ratón");
+        c.activa = true;
+        c.acumular_raton(7, -3);
+        c.acumular_raton(5, 2);
+        assert_eq!((c.dx, c.dy), (12, -1));
+    }
 }
 
 /// Lo capturado entre dos tramas: teclas pulsadas (códigos virtuales), botones
 /// del ratón y su movimiento acumulado. F8 activa y suelta la captura.
 #[derive(Default)]
-struct Captura { activa: bool, teclas: std::collections::HashSet<u32>, izq: bool, der: bool, medio: bool, dx: i32, dy: i32, cambio: bool }
+struct Captura { activa: bool, teclas: std::collections::HashSet<u32>, izq: bool, der: bool, medio: bool, dx: i32, dy: i32, cambio: bool, hubo_raton: bool }
+
+impl Captura {
+    fn acumular_raton(&mut self, dx: i32, dy: i32) {
+        if self.activa {
+            self.dx = self.dx.saturating_add(dx);
+            self.dy = self.dy.saturating_add(dy);
+        }
+    }
+}
 
 static CAPTURA: std::sync::Mutex<Option<Captura>> = std::sync::Mutex::new(None);
 /// `--raton-teclado`: la sesión nativa mira la captura cada 8 ms.
@@ -137,14 +165,15 @@ pub fn tomar() -> Option<Estado> {
     let mut g = CAPTURA.lock().ok()?;
     let c = g.as_mut()?;
     // Al soltar la captura, una vez el mando en reposo.
-    if !c.activa { return std::mem::take(&mut c.cambio).then(Estado::default) }
-    if !(c.cambio || c.dx != 0 || c.dy != 0) { return None }
+    if !c.activa { c.hubo_raton = false; return std::mem::take(&mut c.cambio).then(Estado::default) }
+    let raton_movido = c.dx != 0 || c.dy != 0;
+    if !(c.cambio || raton_movido || c.hubo_raton) { return None }
     let t = |vk: u32| c.teclas.contains(&vk);
     let mover = (i8::from(t(0x44)) - i8::from(t(0x41)), i8::from(t(0x57)) - i8::from(t(0x53)));
     let mapa: [(&[u32], Boton); 13] = [
-        (&[0x20], Boton::A), (&[0x43, 0x11, 0xA2], Boton::B), (&[0x52], Boton::X), (&[0x45], Boton::Y),
+        (&[0x20], Boton::A), (&[0x43, 0x11, 0xA2, 0xA3], Boton::B), (&[0x52], Boton::X), (&[0x45], Boton::Y),
         (&[0x51], Boton::Lb), (&[0x46], Boton::Rb), (&[0x09], Boton::Vista), (&[0x1B], Boton::Menu),
-        (&[0x10, 0xA0], Boton::StickIzq), (&[0x56], Boton::StickDer),
+        (&[0x10, 0xA0, 0xA1], Boton::StickIzq), (&[0x56], Boton::StickDer),
         (&[0x26], Boton::Arriba), (&[0x28], Boton::Abajo), (&[0x25], Boton::Izquierda),
     ];
     let mut botones: Vec<Boton> = mapa.iter().filter(|(vks, _)| vks.iter().any(|v| t(*v))).map(|(_, b)| *b).collect();
@@ -152,6 +181,7 @@ pub fn tomar() -> Option<Estado> {
     if c.medio { botones.push(Boton::StickDer) }
     let e = Estado { mover, raton: (c.dx, c.dy), gatillo_izq: c.der, gatillo_der: c.izq, botones };
     (c.dx, c.dy, c.cambio) = (0, 0, false);
+    c.hubo_raton = raton_movido;
     Some(e)
 }
 
@@ -164,16 +194,55 @@ pub fn activa() -> bool { CAPTURA.lock().ok().and_then(|g| g.as_ref().map(|c| c.
 pub fn capturar() {
     if let Ok(mut g) = CAPTURA.lock() { if g.is_some() { return } *g = Some(Captura::default()) }
     std::thread::Builder::new().name("raton-teclado".into()).spawn(|| unsafe {
+        use windows::core::w;
+        use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+        use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
         use windows::Win32::UI::WindowsAndMessaging::*;
+        // El hilo del gancho usa píxeles físicos para centrar; no cambia el DPI
+        // del resto del proceso. WM_INPUT aporta deltas sin aceleración.
+        let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let ventana = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, HWND_MESSAGE, None, None, None);
+        if ventana.0 == 0 { return }
+        let dispositivo = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: ventana };
+        if RegisterRawInputDevices(&[dispositivo], std::mem::size_of::<RAWINPUTDEVICE>() as u32).is_err() {
+            let _ = DestroyWindow(ventana);
+            return
+        }
         let _k = SetWindowsHookExW(WH_KEYBOARD_LL, Some(teclado), None, 0);
         let _r = SetWindowsHookExW(WH_MOUSE_LL, Some(raton), None, 0);
         let mut m = MSG::default();
-        while GetMessageW(&mut m, None, 0, 0).as_bool() { let _ = DispatchMessageW(&m); }
+        while GetMessageW(&mut m, None, 0, 0).as_bool() {
+            if m.message == WM_INPUT && m.hwnd == ventana { entrada_cruda(m.lParam); }
+            let _ = DispatchMessageW(&m);
+        }
+        let _ = DestroyWindow(ventana);
     }).ok();
 }
 
 #[cfg(not(windows))]
 pub fn capturar() {}
+
+/// Se ejecuta en el hilo de mensajes, fuera de los callbacks de los ganchos.
+#[cfg(windows)]
+unsafe fn entrada_cruda(l: windows::Win32::Foundation::LPARAM) {
+    use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT, RIM_TYPEMOUSE, MOUSE_MOVE_ABSOLUTE};
+    let mut bytes = 0u32;
+    let handle = HRAWINPUT(l.0);
+    let cabecera = std::mem::size_of::<RAWINPUTHEADER>() as u32;
+    if GetRawInputData(handle, RID_INPUT, None, &mut bytes, cabecera) == u32::MAX || bytes < std::mem::size_of::<RAWINPUT>() as u32 { return }
+    let mut buffer = vec![0u64; (bytes as usize).div_ceil(8)];
+    if GetRawInputData(handle, RID_INPUT, Some(buffer.as_mut_ptr().cast()), &mut bytes, cabecera) == u32::MAX { return }
+    let raw = &*(buffer.as_ptr().cast::<RAWINPUT>());
+    if raw.header.dwType != RIM_TYPEMOUSE.0 { return }
+    let mouse = raw.data.mouse;
+    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 == 0 {
+        if let Ok(mut g) = CAPTURA.lock() {
+            if let Some(c) = g.as_mut().filter(|c| c.activa) {
+                c.acumular_raton(mouse.lLastX, mouse.lLastY);
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 fn centro() -> (i32, i32) {
@@ -194,9 +263,8 @@ unsafe extern "system" fn teclado(codigo: i32, w: windows::Win32::Foundation::WP
                 if k.vkCode == F8 && abajo {
                     c.activa = !c.activa;
                     c.teclas.clear();
-                    (c.izq, c.der, c.medio, c.cambio) = (false, false, false, true);
+                    (c.izq, c.der, c.medio, c.cambio, c.dx, c.dy, c.hubo_raton) = (false, false, false, true, 0, 0, false);
                     if c.activa { let (x, y) = centro(); let _ = SetCursorPos(x, y); }
-                    crate::registro::registrar(std::time::Instant::now(), if c.activa { "ratón y teclado: CAPTURADOS para la consola (F8 los suelta)" } else { "ratón y teclado: sueltos" });
                     tragar = true;
                 } else if c.activa {
                     let cambio = if abajo { c.teclas.insert(k.vkCode) } else { c.teclas.remove(&k.vkCode) };
@@ -220,13 +288,10 @@ unsafe extern "system" fn raton(codigo: i32, w: windows::Win32::Foundation::WPAR
             if let Some(c) = g.as_mut() {
                 if c.activa {
                     match w.0 as u32 {
-                        // El cursor no se mueve (se traga): la posición que traería, menos el centro, es el movimiento.
-                        // El que provoca nuestro SetCursorPos (inyectado) no cuenta. Tras cada
-                        // movimiento el cursor vuelve al centro: no se va al borde aunque Windows lo mueva.
+                        // Sólo tragar y recentrar; WM_INPUT trae el delta sin
+                        // aceleración ni mezcla de coordenadas lógicas/físicas.
                         WM_MOUSEMOVE if r.flags & LLMHF_INJECTED == 0 => {
                             let (x, y) = centro();
-                            c.dx += r.pt.x - x;
-                            c.dy += r.pt.y - y;
                             let _ = SetCursorPos(x, y);
                         }
                         WM_LBUTTONDOWN => { c.izq = true; c.cambio = true }

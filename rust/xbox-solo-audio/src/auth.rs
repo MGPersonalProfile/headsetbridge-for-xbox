@@ -40,7 +40,7 @@ pub async fn autenticar(elegir_consola: bool) -> Resultado<Credenciales> {
     let http = Http::nuevo(Duration::from_secs(15), false)?;
     // 1. Token de usuario nuevo. El de refresco rota en cada uso: leer, renovar y
     // guardar van bajo el mismo cerrojo (el relevo autentica en otro hilo a la vez).
-    let cerrojo = Cerrojo::tomar()?;
+    let cerrojo = Cerrojo::tomar().await?;
     let usuario: Value = match refresco_guardado() {
         Some(refresco) => {
             let cuerpo = formulario_cuerpo(&[("client_id", CLIENT_ID), ("grant_type", "refresh_token"), ("refresh_token", &refresco), ("scope", ALCANCE)]);
@@ -48,16 +48,18 @@ pub async fn autenticar(elegir_consola: bool) -> Resultado<Credenciales> {
             if r.bien() { serde_json::from_str(&r.cuerpo)? }
             // Sesión caducada o revocada: se olvida y se pide el código otra vez.
             else if r.cuerpo.contains("invalid_grant") {
-                crate::registro::registrar(Instant::now(), "sesión: la guardada ya no vale (invalid_grant); hay que iniciar sesión otra vez");
-                let _ = std::fs::remove_file(ruta_cuenta());
+                crate::registro::desde_inicio("sesión: la guardada ya no vale (invalid_grant); hay que iniciar sesión otra vez");
+                // También si procedía de Greenlight: no reimportar en el
+                // siguiente intento el mismo token revocado.
+                cerrojo.bloquear_importacion()?;
                 drop(cerrojo);
                 let u = iniciar_sesion(&http).await?;
-                let c = Cerrojo::tomar()?;
+                let c = Cerrojo::tomar().await?;
                 c.guardar(u["refresh_token"].as_str().ok_or("sin refresh_token")?)?;
                 return terminar(&http, u, elegir_consola).await;
             } else { return Err(format!("autenticación: {TOKEN} → {}", r.estado).into()) }
         }
-        None => { drop(cerrojo); let u = iniciar_sesion(&http).await?; let c = Cerrojo::tomar()?; c.guardar(u["refresh_token"].as_str().ok_or("sin refresh_token")?)?; return terminar(&http, u, elegir_consola).await }
+        None => { drop(cerrojo); let u = iniciar_sesion(&http).await?; let c = Cerrojo::tomar().await?; c.guardar(u["refresh_token"].as_str().ok_or("sin refresh_token")?)?; return terminar(&http, u, elegir_consola).await }
     };
     cerrojo.guardar(usuario["refresh_token"].as_str().ok_or("sin refresh_token")?)?;
     drop(cerrojo);
@@ -270,10 +272,16 @@ pub fn ruta_cuenta() -> PathBuf {
 
 /// El refresh_token: el propio o, la primera vez, el de Greenlight (sólo se lee).
 fn refresco_guardado() -> Option<String> {
-    let propio = std::fs::read_to_string(ruta_cuenta()).ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v["refresh_token"].as_str().map(str::to_owned));
-    propio.or_else(|| leer_almacen(&ruta_config()).ok().and_then(|a| a["userToken"]["refresh_token"].as_str().map(str::to_owned)))
+    let propio = std::fs::read_to_string(ruta_cuenta()).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let importado = || leer_almacen(&ruta_config()).ok().and_then(|a| a["userToken"]["refresh_token"].as_str().map(str::to_owned));
+    elegir_refresco(propio.as_ref(), importado)
+}
+
+fn elegir_refresco(propio: Option<&Value>, importado: impl FnOnce() -> Option<String>) -> Option<String> {
+    // Una marca sin token significa que la importación ya falló. No se lee
+    // Greenlight otra vez hasta que una sesión nueva guarde un token válido.
+    if propio.is_some_and(|v| v["import_rejected"] == true) { return None }
+    propio.and_then(|v| v["refresh_token"].as_str().map(str::to_owned)).or_else(importado)
 }
 
 /// El cerrojo de `cuenta.json`: lo toma quien va a leer, renovar y guardar el
@@ -281,8 +289,11 @@ fn refresco_guardado() -> Option<String> {
 struct Cerrojo(PathBuf);
 
 impl Cerrojo {
-    fn tomar() -> Resultado<Self> {
-        let ruta = ruta_cuenta();
+    async fn tomar() -> Resultado<Self> {
+        Self::tomar_en(&ruta_cuenta()).await
+    }
+
+    async fn tomar_en(ruta: &Path) -> Resultado<Self> {
         if let Some(d) = ruta.parent() { std::fs::create_dir_all(d)? }
         let cerrojo = ruta.with_extension("json.lock");
         let inicio = Instant::now();
@@ -295,7 +306,7 @@ impl Cerrojo {
                         let _ = std::fs::remove_file(&cerrojo);
                     }
                     if inicio.elapsed() > Duration::from_secs(20) { return Err("la sesión guardada está ocupada".into()) }
-                    std::thread::sleep(Duration::from_millis(50));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -304,9 +315,17 @@ impl Cerrojo {
 
     /// Guarda el refresh_token nuevo por renombrado (no se queda a medias).
     fn guardar(&self, refresco: &str) -> Resultado<()> {
+        self.guardar_json(json!({ "refresh_token": refresco }))
+    }
+
+    fn bloquear_importacion(&self) -> Resultado<()> {
+        self.guardar_json(json!({ "import_rejected": true }))
+    }
+
+    fn guardar_json(&self, datos: Value) -> Resultado<()> {
         let ruta = ruta_cuenta();
         let temporal = ruta.with_extension(format!("json.{}.{:?}.tmp", std::process::id(), std::thread::current().id()).replace(['(', ')'], ""));
-        std::fs::write(&temporal, json!({ "refresh_token": refresco }).to_string())?;
+        std::fs::write(&temporal, datos.to_string())?;
         std::fs::rename(&temporal, &ruta)?;
         Ok(())
     }
@@ -323,31 +342,84 @@ fn formulario_cuerpo(campos: &[(&str, &str)]) -> String {
 /// Sin sesión: código de dispositivo. Se abre microsoft.com/link en el navegador
 /// y una ventanita con el código (el exe no tiene consola); se sondea hasta que
 /// el usuario lo escribe, como mucho lo que diga Microsoft (15 min).
+struct CodigoPendiente {
+    usuario: String,
+    dispositivo: String,
+    url: String,
+    cada: u64,
+    limite: Instant,
+    mostrado: bool,
+}
+
+impl CodigoPendiente {
+    fn de_respuesta(d: &Value) -> Resultado<Self> {
+        Ok(Self {
+            usuario: d["user_code"].as_str().ok_or("sin user_code")?.to_owned(),
+            dispositivo: d["device_code"].as_str().ok_or("sin device_code")?.to_owned(),
+            url: d["verification_uri"].as_str().unwrap_or("https://www.microsoft.com/link").to_owned(),
+            cada: d["interval"].as_u64().unwrap_or(5).max(1),
+            limite: Instant::now() + Duration::from_secs(d["expires_in"].as_u64().unwrap_or(900)),
+            mostrado: false,
+        })
+    }
+
+    fn mostrar_una_vez(&mut self) -> Option<(&str, &str)> {
+        if self.mostrado { return None }
+        self.mostrado = true;
+        Some((&self.url, &self.usuario))
+    }
+}
+
+enum EstadoCodigo { Libre, Pendiente(CodigoPendiente), Terminado(String) }
+
+fn flujo_codigo() -> &'static tokio::sync::Mutex<EstadoCodigo> {
+    static FLUJO: std::sync::OnceLock<tokio::sync::Mutex<EstadoCodigo>> = std::sync::OnceLock::new();
+    FLUJO.get_or_init(|| tokio::sync::Mutex::new(EstadoCodigo::Libre))
+}
+
 async fn iniciar_sesion(http: &Http) -> Resultado<Value> {
-    let d = formulario(http, "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", &[("client_id", CLIENT_ID), ("scope", ALCANCE)]).await?;
-    let codigo = d["user_code"].as_str().ok_or("sin user_code")?.to_owned();
-    let dispositivo = d["device_code"].as_str().ok_or("sin device_code")?.to_owned();
-    let url = d["verification_uri"].as_str().unwrap_or("https://www.microsoft.com/link").to_owned();
-    let mut cada = d["interval"].as_u64().unwrap_or(5).max(1);
-    let limite = Instant::now() + Duration::from_secs(d["expires_in"].as_u64().unwrap_or(900));
-    crate::registro::registrar(Instant::now(), &format!("sesión: no hay ninguna guardada; inicia sesión en {url} con el código {codigo}"));
-    avisar_codigo(&url, &codigo);
-    while Instant::now() < limite {
-        tokio::time::sleep(Duration::from_secs(cada)).await;
-        let cuerpo = [("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", CLIENT_ID), ("device_code", dispositivo.as_str())]
+    // El relevo y los reintentos comparten una sola solicitud. El mutex se
+    // conserva durante el sondeo para que tampoco haya dos sondeos simultáneos.
+    let mut flujo = flujo_codigo().lock().await;
+    if let EstadoCodigo::Terminado(ref causa) = *flujo { return Err(causa.clone().into()) }
+    if matches!(*flujo, EstadoCodigo::Libre) {
+        let d = formulario(http, "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode", &[("client_id", CLIENT_ID), ("scope", ALCANCE)]).await?;
+        *flujo = EstadoCodigo::Pendiente(CodigoPendiente::de_respuesta(&d)?);
+    }
+    let EstadoCodigo::Pendiente(codigo) = &mut *flujo else { unreachable!() };
+    if let Some((url, usuario)) = codigo.mostrar_una_vez() {
+        crate::registro::desde_inicio(&format!("sesión: inicia sesión en {url} con el código {usuario}"));
+        avisar_codigo(url, usuario);
+    }
+    while Instant::now() < codigo.limite {
+        tokio::time::sleep(Duration::from_secs(codigo.cada)).await;
+        if Instant::now() >= codigo.limite { break }
+        let cuerpo = [("grant_type", "urn:ietf:params:oauth:grant-type:device_code"), ("client_id", CLIENT_ID), ("device_code", codigo.dispositivo.as_str())]
             .iter().map(|(k, v)| format!("{}={}", codificar(k), codificar(v))).collect::<Vec<_>>().join("&");
-        let r = http.pedir("POST", TOKEN, &[("Content-Type", "application/x-www-form-urlencoded")], Some(cuerpo)).await?;
-        if r.bien() { return Ok(serde_json::from_str(&r.cuerpo)?) }
+        // Un fallo de red no invalida el código ni vuelve a abrir el navegador.
+        let r = match http.pedir("POST", TOKEN, &[("Content-Type", "application/x-www-form-urlencoded")], Some(cuerpo)).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if r.bien() {
+            let usuario = serde_json::from_str(&r.cuerpo)?;
+            *flujo = EstadoCodigo::Libre;
+            return Ok(usuario)
+        }
         let error = serde_json::from_str::<Value>(&r.cuerpo).ok().and_then(|v| v["error"].as_str().map(str::to_owned)).unwrap_or_default();
         match error.as_str() {
             "authorization_pending" => {}
-            "slow_down" => cada += 5,
-            "authorization_declined" => return Err("inicio de sesión: rechazado en la página de Microsoft".into()),
-            "expired_token" => return Err("inicio de sesión: el código caducó; vuelve a abrirlo".into()),
-            otro => return Err(format!("inicio de sesión: {otro} ({})", r.estado).into()),
+            "slow_down" => codigo.cada += 5,
+            "authorization_declined" => { *flujo = EstadoCodigo::Terminado("inicio de sesión: rechazado; reinicia el cliente para solicitar otro código".into()); break }
+            "expired_token" => { *flujo = EstadoCodigo::Terminado("inicio de sesión: código caducado; reinicia el cliente para solicitar otro".into()); break }
+            otro => { *flujo = EstadoCodigo::Terminado(format!("inicio de sesión: {otro} ({})", r.estado)); break }
         }
     }
-    Err("inicio de sesión: el código caducó sin usarse".into())
+    if matches!(*flujo, EstadoCodigo::Pendiente(_)) {
+        *flujo = EstadoCodigo::Terminado("inicio de sesión: código caducado sin usarse; reinicia el cliente para solicitar otro".into());
+    }
+    let EstadoCodigo::Terminado(ref causa) = *flujo else { unreachable!() };
+    Err(causa.clone().into())
 }
 
 /// Abre la página en el navegador y enseña el código en una ventanita (en su
@@ -366,3 +438,51 @@ fn avisar_codigo(url: &str, codigo: &str) {
 
 #[cfg(not(windows))]
 fn avisar_codigo(_: &str, _: &str) {}
+
+#[cfg(test)]
+mod pruebas {
+    use super::*;
+
+    #[test]
+    fn token_rechazado_no_se_importa_de_nuevo() {
+        let lecturas = std::cell::Cell::new(0);
+        let mut importar = || { lecturas.set(lecturas.get() + 1); Some("token-importado".to_owned()) };
+        assert_eq!(elegir_refresco(Some(&json!({"import_rejected": true})), &mut importar), None);
+        assert_eq!(lecturas.get(), 0);
+        assert_eq!(elegir_refresco(None, &mut importar).as_deref(), Some("token-importado"));
+        assert_eq!(lecturas.get(), 1);
+        assert_eq!(elegir_refresco(Some(&json!({"refresh_token": "propio"})), &mut importar).as_deref(), Some("propio"));
+        assert_eq!(lecturas.get(), 1);
+    }
+
+    #[test]
+    fn codigo_pendiente_se_presenta_una_vez_y_conserva_su_plazo() {
+        let mut codigo = CodigoPendiente::de_respuesta(&json!({
+            "user_code": "ABCD", "device_code": "interno", "verification_uri": "https://example.test/link",
+            "interval": 2, "expires_in": 120
+        })).unwrap();
+        let plazo = codigo.limite;
+        assert_eq!(codigo.mostrar_una_vez(), Some(("https://example.test/link", "ABCD")));
+        assert_eq!(codigo.mostrar_una_vez(), None);
+        assert_eq!(codigo.dispositivo, "interno");
+        assert_eq!(codigo.limite, plazo);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn espera_del_cerrojo_no_bloquea_tokio() {
+        let ruta = std::env::temp_dir().join(format!("xbox-cerrojo-prueba-{}", std::process::id())).join("cuenta.json");
+        std::fs::create_dir_all(ruta.parent().unwrap()).unwrap();
+        let lock = ruta.with_extension("json.lock");
+        std::fs::write(&lock, "ocupado").unwrap();
+        let quitar = lock.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::remove_file(quitar).unwrap();
+        });
+        let inicio = Instant::now();
+        let cerrojo = tokio::time::timeout(Duration::from_secs(2), Cerrojo::tomar_en(&ruta)).await.unwrap().unwrap();
+        assert!(inicio.elapsed() >= Duration::from_millis(100));
+        drop(cerrojo);
+        std::fs::remove_dir(ruta.parent().unwrap()).unwrap();
+    }
+}

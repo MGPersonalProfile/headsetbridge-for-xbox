@@ -17,6 +17,7 @@ const MAXIMO: u64 = 2 * 1024 * 1024;
 enum Orden { Linea(String), Vaciar(Sender<()>) }
 
 static ESCRITOR: OnceLock<Sender<Orden>> = OnceLock::new();
+static INICIO: OnceLock<Instant> = OnceLock::new();
 /// líneas encoladas que el hilo del disco aún no ha escrito (el
 /// canal no tiene cota: si el disco se atasca, crece aquí).
 static EN_COLA: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -60,11 +61,17 @@ fn escritor() -> &'static Sender<Orden> {
 }
 
 pub fn registrar(t0: Instant, texto: &str) {
+    INICIO.get_or_init(|| t0);
     let linea = format!("[{:>6} ms] {texto}", t0.elapsed().as_millis());
     // Sin consola (subsistema Windows), la salida estándar descarta sin fallar.
     println!("{linea}");
     EN_COLA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if escritor().send(Orden::Linea(linea)).is_err() { EN_COLA.fetch_sub(1, std::sync::atomic::Ordering::Relaxed); }
+}
+
+/// Para rutas sin acceso al t0 de la sesión: tiempo desde el primer registro.
+pub fn desde_inicio(texto: &str) {
+    registrar(*INICIO.get_or_init(Instant::now), texto);
 }
 
 /// Espera (hasta 2 s) a que lo encolado esté en el disco: antes de salir del proceso.
