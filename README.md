@@ -24,6 +24,8 @@ One double-click starts it, another one stops it (single instance, no window).
 ## Requirements
 
 - Windows 10/11, x64.
+- [Microsoft Visual C++ v14 Redistributable, x64](https://aka.ms/vc14/vc_redist.x64.exe).
+  Install it if Windows reports that `VCRUNTIME140.dll` is missing.
 - An Xbox One or Xbox Series X|S with **remote play enabled**
   (Settings › Devices & connections › Remote features), on the same local
   network as the PC.
@@ -35,15 +37,15 @@ One double-click starts it, another one stops it (single instance, no window).
 
 ## Install
 
-1. Download the `headsetbridge-windows` artifact from the latest
-   [build](../../actions) and unzip it.
+1. Download the Windows x64 ZIP from the [latest release](../../releases/latest)
+   and unzip it. The `.exe`, installer script, icon, instructions and licenses are included.
 2. Run `powershell -ExecutionPolicy Bypass -File tools\install.ps1 -Exe rust\target\release\xbox-solo-audio.exe`.
    It copies the exe to `%LOCALAPPDATA%\Programs\XboxSoloAudioRust` and creates a
    desktop folder with a shortcut per mode (`-Volumen 100` for no extra gain;
    the default is 120 % with a soft limiter).
 
 The exe is not code-signed, so Windows SmartScreen may warn the first time.
-The shortcuts, the read-me that comes with them and the log are in Spanish for now.
+The shortcuts and the desktop read-me are in English; diagnostic log messages are in Spanish.
 
 ## Known limits
 
